@@ -3,6 +3,7 @@ require 'cosmic/plugin'
 
 require_with_hint 'net/ssh', "In order to use the ssh plugin please run 'gem install net-ssh'"
 require_with_hint 'net/scp', "In order to use the ssh plugin please run 'gem install net-scp'"
+require_with_hint 'net/ssh/gateway', "In order to use the ssh plugin please run 'gem install net-ssh-gateway'"
 
 module Cosmic
   # A plugin that makes SSH and SCP available to Cosmic scripts, e.g. to perform actions on remote
@@ -77,7 +78,7 @@ module Cosmic
           user = params[:user] || @config[:auth][:username]
           opts = merge_with_ssh_opts(params)
           response = ""
-          Net::SSH.start(host, user, opts) do |ssh|
+          do_ssh(params[:gateway], host, user, opts) do |ssh|
             ssh.exec!(cmd) do |ch, stream, line|
               line.rstrip.split("\n").each do |str|
                 unless str.nil? || str.length == 0
@@ -139,7 +140,7 @@ module Cosmic
           if params.has_key?(:recursive) && !!params[:recursive]
             upload_opts[:recursive] = true
           end
-          Net::SCP.start(host, user, opts) do |scp|
+          do_scp(params[:gateway], host, user, opts) do |scp|
             scp.upload!(local, remote, upload_opts, &block)
           end
         rescue Net::SSH::AuthenticationFailed => e
@@ -192,7 +193,7 @@ module Cosmic
           if params.has_key?(:recursive) && !!params[:recursive]
             download_opts[:recursive] = true
           end
-          Net::SCP.start(host, user, merge_with_ssh_opts(params)) do |scp|
+          do_scp(params[:gateway], host, user, opts) do |scp|
             scp.download!(remote, local, download_opts, &block)
           end
         rescue Net::SSH::AuthenticationFailed => e
@@ -231,6 +232,39 @@ module Cosmic
         opts = opts.merge(:keys => arrayify(params[:keys]))
       end
       opts
+    end
+
+    def with_gateway(gateway_spec, host, port, &block)
+      gw_host_and_port, gw_user = gateway_spec.split('@').reverse
+      gw_host, gw_port = gw_host_and_port.split(':')
+      gateway = Net::SSH::Gateway.new(gw_host, gw_user, :port => gw_port || 22)
+      local_port = gateway.open(host, port || 22)
+      begin
+        yield local_port
+      ensure
+        gateway.close(local_port) if block || $!
+        gateway.shutdown!
+      end
+    end
+
+    def do_ssh(gateway, host, user, opts, &block)
+      if gateway
+        with_gateway(gateway, host, opts[:port]) do |local_port|
+          Net::SSH.start("127.0.0.1", user, opts.merge(:port => local_port), &block)
+        end
+      else
+        Net::SSH.start(host, user, opts, &block)
+      end
+    end
+
+    def do_scp(gateway, host, user, opts, &block)
+      if gateway
+        with_gateway(gateway, host, opts[:port]) do |local_port|
+          Net::SCP.start("127.0.0.1", user, opts.merge(:port => local_port), &block)
+        end
+      else
+        Net::SCP.start(host, user, opts, &block)
+      end
     end
   end
 end
